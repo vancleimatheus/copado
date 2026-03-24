@@ -1,0 +1,319 @@
+// ============================================================
+// schema.prisma — SaaS Campeonatos de Futebol Amador
+// Stack: PostgreSQL + Prisma + Supabase
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")   // ← adicionar esta linha
+}
+
+// ============================================================
+// AUTENTICAÇÃO
+// ============================================================
+
+model User {
+  id            String   @id @default(uuid())
+  name          String
+  email         String   @unique
+  phone         String?
+  passwordHash  String   @map("password_hash")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  championships Championship[]
+  subscription  Subscription?
+
+  @@map("users")
+}
+
+// ============================================================
+// CAMPEONATO
+// ============================================================
+
+enum ChampionshipFormat {
+  PONTOS_CORRIDOS
+  MATA_MATA
+  GRUPOS_E_MATA_MATA
+}
+
+enum ChampionshipStatus {
+  RASCUNHO
+  INSCRICOES_ABERTAS
+  EM_ANDAMENTO
+  ENCERRADO
+}
+
+model Championship {
+  id          String             @id @default(uuid())
+  ownerId     String             @map("owner_id")
+  name        String
+  slug        String             @unique  // URL pública: /c/{slug}
+  format      ChampionshipFormat
+  numTeams    Int                @map("num_teams")
+  status      ChampionshipStatus @default(RASCUNHO)
+  startDate   DateTime?          @map("start_date")
+  description String?
+  logoUrl     String?            @map("logo_url")
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+
+  owner         User                   @relation(fields: [ownerId], references: [id])
+  teams         Team[]
+  rounds        Round[]
+  standings     Standing[]
+  pageViews     PageView[]
+  notifications WhatsappNotification[]
+
+  @@map("championships")
+}
+
+// ============================================================
+// TIMES E JOGADORES
+// ============================================================
+
+model Team {
+  id               String   @id @default(uuid())
+  championshipId   String   @map("championship_id")
+  name             String
+  managerName      String   @map("manager_name")
+  managerPhone     String?  @map("manager_phone")
+  shieldUrl        String?  @map("shield_url")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  championship Championship @relation(fields: [championshipId], references: [id], onDelete: Cascade)
+  players      Player[]
+  homeMatches  Match[]      @relation("HomeTeam")
+  awayMatches  Match[]      @relation("AwayTeam")
+  goals        Goal[]
+  cards        Card[]
+  standing     Standing?
+
+  @@map("teams")
+}
+
+enum PlayerPosition {
+  GOLEIRO
+  ZAGUEIRO
+  LATERAL
+  VOLANTE
+  MEIA
+  ATACANTE
+}
+
+model Player {
+  id        String          @id @default(uuid())
+  teamId    String          @map("team_id")
+  name      String
+  number    Int?
+  position  PlayerPosition?
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  team  Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  goals Goal[]
+  cards Card[]
+
+  @@map("players")
+}
+
+// ============================================================
+// RODADAS E PARTIDAS
+// ============================================================
+
+model Round {
+  id             String    @id @default(uuid())
+  championshipId String    @map("championship_id")
+  number         Int
+  label          String    // ex: "Rodada 1", "Quartas de Final"
+  scheduledDate  DateTime? @map("scheduled_date")
+
+  championship Championship @relation(fields: [championshipId], references: [id], onDelete: Cascade)
+  matches      Match[]
+
+  @@unique([championshipId, number])
+  @@map("rounds")
+}
+
+enum MatchStatus {
+  AGENDADA
+  EM_ANDAMENTO
+  ENCERRADA
+  CANCELADA
+  WO // Walkover
+}
+
+model Match {
+  id            String      @id @default(uuid())
+  roundId       String      @map("round_id")
+  homeTeamId    String      @map("home_team_id")
+  awayTeamId    String      @map("away_team_id")
+  homeScore     Int?        @map("home_score")
+  awayScore     Int?        @map("away_score")
+  status        MatchStatus @default(AGENDADA)
+  matchDatetime DateTime?   @map("match_datetime")
+  location      String?
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+
+  round    Round  @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  homeTeam Team   @relation("HomeTeam", fields: [homeTeamId], references: [id])
+  awayTeam Team   @relation("AwayTeam", fields: [awayTeamId], references: [id])
+  goals    Goal[]
+  cards    Card[]
+
+  @@map("matches")
+}
+
+// ============================================================
+// EVENTOS DE PARTIDA (gols e cartões)
+// ============================================================
+
+model Goal {
+  id       String  @id @default(uuid())
+  matchId  String  @map("match_id")
+  playerId String  @map("player_id")
+  teamId   String  @map("team_id")
+  minute   Int?
+  ownGoal  Boolean @default(false) @map("own_goal")
+
+  match  Match  @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  player Player @relation(fields: [playerId], references: [id])
+  team   Team   @relation(fields: [teamId], references: [id])
+
+  @@map("goals")
+}
+
+enum CardType {
+  AMARELO
+  VERMELHO
+  AMARELO_VERMELHO // Segundo amarelo
+}
+
+model Card {
+  id       String   @id @default(uuid())
+  matchId  String   @map("match_id")
+  playerId String   @map("player_id")
+  teamId   String   @map("team_id")
+  type     CardType
+  minute   Int?
+
+  match  Match  @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  player Player @relation(fields: [playerId], references: [id])
+  team   Team   @relation(fields: [teamId], references: [id])
+
+  @@map("cards")
+}
+
+// ============================================================
+// CLASSIFICAÇÃO (tabela materializada)
+// Atualizada automaticamente após cada resultado
+// ============================================================
+
+model Standing {
+  id             String @id @default(uuid())
+  championshipId String @map("championship_id")
+  teamId         String @unique @map("team_id")
+  played         Int    @default(0)
+  wins           Int    @default(0)
+  draws          Int    @default(0)
+  losses         Int    @default(0)
+  goalsFor       Int    @default(0) @map("goals_for")
+  goalsAgainst   Int    @default(0) @map("goals_against")
+  points         Int    @default(0)
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  championship Championship @relation(fields: [championshipId], references: [id], onDelete: Cascade)
+  team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@map("standings")
+}
+
+// ============================================================
+// LOOP VIRAL — métricas da página pública
+// ============================================================
+
+model PageView {
+  id             String   @id @default(uuid())
+  championshipId String   @map("championship_id")
+  visitorToken   String   @map("visitor_token") // cookie anônimo
+  source         String?  // "whatsapp", "direct", "instagram", etc.
+  viewedAt       DateTime @default(now()) @map("viewed_at")
+
+  championship Championship @relation(fields: [championshipId], references: [id], onDelete: Cascade)
+
+  @@index([championshipId, viewedAt])
+  @@map("page_views")
+}
+
+// ============================================================
+// NOTIFICAÇÕES WHATSAPP
+// ============================================================
+
+enum NotificationStatus {
+  PENDENTE
+  ENVIADO
+  FALHOU
+}
+
+model WhatsappNotification {
+  id             String             @id @default(uuid())
+  championshipId String             @map("championship_id")
+  matchId        String?            @map("match_id")
+  recipientPhone String             @map("recipient_phone")
+  message        String
+  status         NotificationStatus @default(PENDENTE)
+  sentAt         DateTime?          @map("sent_at")
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  championship Championship @relation(fields: [championshipId], references: [id], onDelete: Cascade)
+
+  @@map("whatsapp_notifications")
+}
+
+// ============================================================
+// MONETIZAÇÃO — planos e assinaturas
+// (preparado desde o início, ativado quando chegar a hora)
+// ============================================================
+
+model Plan {
+  id                String   @id @default(uuid())
+  name              String   @unique  // "Gratuito", "Organizador", "Liga Pro"
+  priceMonthly      Decimal  @default(0) @map("price_monthly") @db.Decimal(10, 2)
+  maxChampionships  Int      @default(1) @map("max_championships")  // -1 = ilimitado
+  whatsappNotify    Boolean  @default(false) @map("whatsapp_notify")
+  advancedStats     Boolean  @default(false) @map("advanced_stats")
+  multipleAdmins    Boolean  @default(false) @map("multiple_admins")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+enum SubscriptionStatus {
+  ATIVA
+  CANCELADA
+  INADIMPLENTE
+  TRIAL
+}
+
+model Subscription {
+  id                String             @id @default(uuid())
+  userId            String             @unique @map("user_id")
+  planId            String             @map("plan_id")
+  status            SubscriptionStatus @default(TRIAL)
+  currentPeriodEnd  DateTime?          @map("current_period_end")
+  gatewayId         String?            @map("gateway_id")  // ID no Stripe/Pagar.me
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id])
+  plan Plan @relation(fields: [planId], references: [id])
+
+  @@map("subscriptions")
+}
